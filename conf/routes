@@ -11,6 +11,9 @@
 
 # GET     /api-docs.json/user           controllers.ApiHelpController.getResource(path = "/api-docs.json/user")
 
+# Serve index.html static file for home requests
+GET     /crossdomain.xml                controllers.Assets.at(path="/public", file="crossdomain.xml")
+
 # Admin Panel Static Asset
 GET 	/console						controllers.Default.redirect(to = "/console/")
 GET		/console/index.html				controllers.Default.redirect(to = "/console/")
