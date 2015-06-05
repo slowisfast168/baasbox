@@ -19,8 +19,12 @@ package com.baasbox.controllers;
 import java.io.IOException;
 import java.security.InvalidParameterException;
 import java.util.ArrayList;
+import java.util.LinkedList;
 import java.util.List;
 
+import com.baasbox.service.storage.CollectionService;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import org.apache.commons.lang.BooleanUtils;
 import org.apache.commons.lang.exception.ExceptionUtils;
 import org.apache.commons.lang3.StringUtils;
@@ -32,6 +36,7 @@ import play.mvc.Http.Context;
 import play.mvc.Result;
 import play.mvc.Results;
 import play.mvc.With;
+import play.libs.Json;
 
 import com.baasbox.controllers.actions.exceptions.RidNotFoundException;
 import com.baasbox.controllers.actions.filters.ConnectToDBFilter;
@@ -177,6 +182,132 @@ public class Document extends Controller {
 		if (BaasBoxLogger.isTraceEnabled()) BaasBoxLogger.trace("Method End");
 		return ok(ret);
 	}
+
+
+
+	//start: alex - add this method to get all fields of a collection
+	@With ({UserOrAnonymousCredentialsFilter.class,ConnectToDBFilter.class,ExtractQueryParameters.class})
+	public static Result getCollectionFields(String collectionName){
+		if (BaasBoxLogger.isTraceEnabled()) BaasBoxLogger.trace("Method Start");
+		if (BaasBoxLogger.isTraceEnabled()) BaasBoxLogger.trace("collectionName: " + collectionName);
+
+		//save the fields to document
+		ODocument document=null;
+		try{
+			QueryParams criteria = QueryParams.getInstance().where("collection=?").params(new String[]{collectionName});
+			List<ODocument> existDocs = DocumentService.getDocuments("CollectionFields", criteria);
+			if(existDocs != null && existDocs.size() > 0){
+				document =  existDocs.get(0); //return the existing one
+			}
+			else{
+				//create the collection fields
+				return createCollectionFields(collectionName);
+			}
+			if (BaasBoxLogger.isTraceEnabled()) BaasBoxLogger.trace("Document created: " + document.getRecord().getIdentity());
+		}catch (InvalidCollectionException e){
+			return notFound(ExceptionUtils.getMessage(e));
+		}catch (Throwable e){
+			BaasBoxLogger.error(ExceptionUtils.getFullStackTrace(e));
+			return internalServerError(ExceptionUtils.getFullStackTrace(e));
+		}
+		//end save
+
+		if (BaasBoxLogger.isTraceEnabled()) BaasBoxLogger.trace("Method End");
+		return ok(prepareResponseToJson(document));
+	}
+
+	@With ({UserOrAnonymousCredentialsFilter.class,ConnectToDBFilter.class,ExtractQueryParameters.class})
+	public static Result createCollectionFields(String collectionName){
+		if (BaasBoxLogger.isTraceEnabled()) BaasBoxLogger.trace("Method Start");
+		if (BaasBoxLogger.isTraceEnabled()) BaasBoxLogger.trace("collectionName: " + collectionName);
+
+		List<ODocument> docs;
+		List<String> result = new LinkedList<String>();
+		String ret="";
+		try {
+			Context ctx=Http.Context.current.get();
+			QueryParams criteria = (QueryParams) ctx.args.get(IQueryParametersKeys.QUERY_PARAMETERS);
+			docs = DocumentService.getDocuments(collectionName,criteria);
+
+			for(ODocument doc : docs){
+				String[] fields = doc.fieldNames();
+				for(String filed : fields){
+					if(!result.contains(filed)){
+						if(!isOmitField(filed))
+							result.add(filed); //add the field to the result if not find
+					}
+				}
+			}
+			//always return the "_audit.modifiedOn as modifiedOn". this is a virtual column, not the actual one
+			if(!result.contains("modifiedOn")){
+				result.add("modifiedOn");
+			}
+
+			if (BaasBoxLogger.isTraceEnabled()) BaasBoxLogger.trace("count: " + result.size());
+		} catch (InvalidCollectionException e) {
+			if (BaasBoxLogger.isDebugEnabled()) BaasBoxLogger.debug (collectionName + " is not a valid collection name");
+			return notFound(collectionName + " is not a valid collection name");
+		} catch (Exception e){
+			BaasBoxLogger.error(ExceptionUtils.getFullStackTrace(e));
+			return internalServerError(ExceptionUtils.getMessage(e));
+		}
+
+		//save the fields to document
+		ODocument document=null;
+		try{
+			if (BaasBoxLogger.isTraceEnabled()) BaasBoxLogger.trace("creating document in collection: CollectionFields");
+			ObjectMapper mapper = new ObjectMapper();
+			ArrayNode fields = mapper.valueToTree(result);
+			ObjectNode fieldsNode = mapper.createObjectNode();
+			fieldsNode.putArray("fields").addAll(fields);
+			fieldsNode.put("collection", collectionName);
+
+			//make sure the "CollectionFields" collection exists, otherwise create it
+			QueryParams criteriaCollection = QueryParams.getInstance().where("collection=?").params(new String[]{collectionName});
+			if(!CollectionService.exists("CollectionFields")){
+				CollectionService.create("CollectionFields");
+			}
+			//if the record already exist,then remove it firstly, otherwise create
+			QueryParams criteria = QueryParams.getInstance().where("collection=?").params(new String[]{collectionName});
+			List<ODocument> existDocs = DocumentService.getDocuments("CollectionFields", criteria);
+			if(existDocs != null && existDocs.size() > 0){
+				for(ODocument existDoc : existDocs){
+					existDoc.delete();
+				}
+			}
+			document=DocumentService.create("CollectionFields", fieldsNode);
+
+			if (BaasBoxLogger.isTraceEnabled()) BaasBoxLogger.trace("Document created: " + document.getRecord().getIdentity());
+		}catch (InvalidCollectionException e){
+			return notFound(ExceptionUtils.getMessage(e));
+		}catch (InvalidJsonException e){
+			return badRequest("JSON not valid. HINT: check if it is not just a JSON collection ([..]), a single element ({\"element\"}) or you are trying to pass a @version:null field");
+		}catch (UpdateOldVersionException e){
+			return badRequest(ExceptionUtils.getMessage(e));
+		} catch (InvalidModelException e) {
+			return badRequest("ACL fields are not valid: " + ExceptionUtils.getMessage(e));
+		}catch (Throwable e){
+			BaasBoxLogger.error(ExceptionUtils.getFullStackTrace(e));
+			return internalServerError(ExceptionUtils.getFullStackTrace(e));
+		}
+
+		if (BaasBoxLogger.isTraceEnabled()) BaasBoxLogger.trace("Method End");
+		return ok(prepareResponseToJson(document));
+	}
+
+	private static boolean isOmitField(String field){
+		if(field.equals("_links") ||
+				field.equals("_audit") ||
+				field.equals("_allow") ||
+				field.equals("_allowRead") ||
+				field.equals("_allowUpdate") ||
+				field.equals("_allowDelete") ){
+			return true;
+		}
+
+		return false;
+	}
+	//end: alex yang - 2015.06.04
 
     @With ({UserOrAnonymousCredentialsFilter.class,ConnectToDBFilter.class,ExtractQueryParameters.class})
 	public static Result queryDocument(String collectionName,String id,boolean isUUID,String parts){
