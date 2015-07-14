@@ -23,9 +23,14 @@ import static play.mvc.Results.badRequest;
 import static play.mvc.Results.internalServerError;
 import static play.mvc.Results.notFound;
 
+import java.util.Date;
 import java.util.Iterator;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
+import akka.actor.Cancellable;
+import com.kingblinginteractive.pushnotification.PushManager;
+import com.kingblinginteractive.pushnotification.PushMessageSender;
 import org.apache.commons.lang.StringUtils;
 import org.apache.commons.lang.exception.ExceptionUtils;
 import org.apache.commons.lang3.math.NumberUtils;
@@ -38,8 +43,10 @@ import play.Play;
 import play.api.mvc.EssentialFilter;
 import play.core.j.JavaResultExtractor;
 import play.filters.gzip.GzipFilter;
+import play.libs.Akka;
 import play.libs.F;
 import play.libs.Json;
+import play.libs.Time;
 import play.mvc.Http.RequestHeader;
 import play.mvc.SimpleResult;
 
@@ -61,8 +68,13 @@ import com.orientechnologies.orient.core.db.document.ODatabaseDocumentPool;
 import com.orientechnologies.orient.core.db.document.ODatabaseDocumentTx;
 import com.orientechnologies.orient.core.db.record.ODatabaseRecordTx;
 import com.orientechnologies.orient.core.exception.ODatabaseException;
+import scala.concurrent.duration.Duration;
+import scala.concurrent.duration.FiniteDuration;
 
 public class Global extends GlobalSettings {
+	private Cancellable scheduler; //alex yang
+	private int scheduledTimes = 0; //alex yang
+
 	static {
         /*Initialize this before anything else to avoid reflection*/
         ScriptingSandboxSecutrityManager.init();
@@ -210,7 +222,42 @@ public class Global extends GlobalSettings {
 	    info("Documentation is available at http://www.baasbox.com/documentation");
 		debug("Global.onStart() ended");
 	    info("BaasBox is Ready.");
+
+	  	//alex yang
+	  	schedule();
 	  }
+
+	//start: alex yang
+	private void schedule() {
+		try {
+			Time.CronExpression e = new Time.CronExpression(PushMessageSender.SCHEDULER_START_TIME); //run every day at 17:00 in the afternoon
+			Date nextValidTimeAfter = e.getNextValidTimeAfter(new Date());
+			FiniteDuration d = Duration.create(
+					nextValidTimeAfter.getTime() - System.currentTimeMillis(),
+					TimeUnit.MILLISECONDS);
+
+//			d = Duration.create(30000, TimeUnit.MILLISECONDS);//debug only. comment it in production
+
+			BaasBoxLogger.debug("Scheduling to run at " + nextValidTimeAfter);
+			scheduler = Akka.system().scheduler().scheduleOnce(d,
+					new Runnable() {
+						@Override
+						public void run() {
+							scheduledTimes++;
+							BaasBoxLogger.debug("Ruuning scheduler times: " + scheduledTimes + "th, at " + new Date().toLocaleString());
+
+							//Do your tasks here
+							PushManager.getPushManager().sendPush();
+
+							//Schedule for next time
+							schedule();
+						}
+			}, Akka.system().dispatcher());
+		} catch (Exception e) {
+			BaasBoxLogger.error("The push notification scheduler exception!!!", e.getMessage());
+		}
+	}
+	//end
 
 	private void overrideSettings() {
 		info ("Override settings...");
@@ -285,6 +332,12 @@ public class Global extends GlobalSettings {
 	    SessionTokenProvider.destroySessionTokenProvider();
 	    info("...BaasBox has stopped");
 		debug("Global.onStop() ended");
+
+		  //start:Stop the scheduler
+		  if (scheduler != null) {
+			  scheduler.cancel();
+		  }
+		  //end: alex
 	  }  
 	  
 	private void setCallIdOnResult(RequestHeader request, ObjectNode result) {
